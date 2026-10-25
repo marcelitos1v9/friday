@@ -12,6 +12,25 @@ Assistente pessoal para Windows inspirado na Sexta-Feira do Homem de Ferro. É u
 - Ícone na bandeja (abrir, widget, modo jogo, sair) e atalho global **Ctrl+Alt+F**.
 - Fechar a janela só a esconde; para sair use o botão Sair ou a bandeja.
 
+## Diagnóstico profundo (etapa M4)
+
+O botão **Diagnóstico** abre a página "o que está errado no meu PC". Ela junta:
+
+- **Log de Eventos** (System e Application, últimos 7 dias): telas azuis, desligamentos inesperados, erros de hardware WHEA, setores defeituosos e erros de disco, erros de NTFS, travamentos do driver de vídeo, serviços falhando e programas que fecham sozinhos (com o nome do programa). Ruído conhecido como DCOM 10016 é ignorado.
+- **Discos**: saúde do Windows, previsão de falha do SMART, desgaste do SSD, erros não corrigidos, temperatura e espaço livre.
+- **Drivers**: dispositivos com alerta amarelo no Gerenciador de Dispositivos, driver de vídeo com mais de 1 ano e drivers de rede, áudio, chipset e USB muito antigos. A idade é só um indício; não há consulta à internet.
+- **Temperaturas**: todos os sensores do sistema, todas as GPUs NVIDIA e os discos. O Windows não mostra a temperatura da CPU para programas comuns; se o [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) estiver aberto, a Sexta-Feira lê todos os sensores dele.
+
+Cada item vem com gravidade e uma sugestão. A coleta roda numa thread em prioridade de segundo plano do Windows (CPU e disco), só quando você pede ou a cada 6 horas, e nunca sozinha durante o modo jogo. Desgaste, erros e SMART dos discos exigem rodar como administrador; sem isso aparecem em "Não verificado".
+
+Para rodar só o diagnóstico e gravar o JSON (o mesmo que o cérebro recebe):
+
+```
+sexta-feira.exe --diagnostico diagnostico.json
+```
+
+O cérebro usa a ferramenta `diagnosticar_pc` de `src/diagnostics/tool.rs`: `tool::definition()` vai na lista de ferramentas do modelo e `tool::call(&diag, &input)` devolve o resultado.
+
 Consumo medido em release: cerca de 22 MB de RAM e 0,2% de CPU.
 
 ## Compilar
@@ -47,6 +66,10 @@ Na primeira execução é criado `%APPDATA%\sexta-feira\config\config.toml`:
 | `game_mode.detect_fullscreen` | true | Trata qualquer janela em tela cheia como jogo |
 | `game_mode.executables` | lista de jogos populares | Executáveis que sempre ligam o modo jogo |
 | `game_mode.hide_widget` | false | Esconde o widget durante o jogo |
+| `diagnostics.auto_interval_h` | 6 | De quantas em quantas horas o diagnóstico roda sozinho (0 = só quando pedir) |
+| `diagnostics.startup_delay_s` | 180 | Espera após abrir antes do primeiro diagnóstico automático |
+| `diagnostics.event_days` | 7 | Dias do Log de Eventos analisados |
+| `diagnostics.old_driver_years` | 3 | Idade a partir da qual drivers de rede, áudio, chipset etc. aparecem |
 
 ## Estrutura
 
@@ -55,6 +78,7 @@ Na primeira execução é criado `%APPDATA%\sexta-feira\config\config.toml`:
 | `src/main.rs` | Inicialização, janelas e a thread de monitoramento |
 | `src/monitor.rs` | Coleta de métricas com frequências diferentes por tipo de dado |
 | `src/gamemode.rs` | Detecção de jogo e economia de energia (EcoQoS) |
+| `src/diagnostics/` | Diagnóstico profundo: coleta (`collect/`), regras (`rules.rs`), ferramenta do cérebro (`tool.rs`) |
 | `src/tray.rs` | Bandeja e atalho global (só Windows) |
 | `src/config.rs` | Leitura e gravação do `config.toml` |
 | `ui/*.slint` | Interface (Slint) |
@@ -64,4 +88,3 @@ Na primeira execução é criado `%APPDATA%\sexta-feira\config\config.toml`:
 - **M1 Voz:** palavra de ativação "Sexta-Feira", Whisper local e motor de voz neural próprio (Chatterbox Multilingual, Kokoro no modo jogo).
 - **M2 Cérebro e ações:** LLM com ferramentas para abrir apps, controlar volume e mídia, lembretes e rotinas.
 - **M3 Modo jogo:** medir o impacto real em FPS e ajustar.
-- **M4 Diagnóstico:** Log de Eventos do Windows, SMART dos discos e drivers.

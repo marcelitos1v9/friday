@@ -2,17 +2,20 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod config;
+mod diagnostics;
 mod gamemode;
 mod monitor;
 #[cfg(windows)]
 mod tray;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 
 use slint::{ComponentHandle, ModelRc, PhysicalPosition, SharedString, VecModel};
 
 use config::Config;
+use diagnostics::{Diagnostics, Level, Report};
 use gamemode::GameDetector;
 use monitor::{Monitor, Severity, Snapshot};
 
@@ -39,6 +42,14 @@ fn main() -> anyhow::Result<()> {
         log::error!("{e:#}; usando configuração padrão");
         Config::default()
     });
+
+    // `sexta-feira --diagnostico [arquivo.json]`: roda só o diagnóstico profundo, grava o
+    // resultado (o mesmo JSON que o cérebro recebe) e sai. Útil para testar e para o CI.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--diagnostico") {
+        return run_diagnostics_cli(&cfg, args.get(i + 1));
+    }
+
     let cfg = Arc::new(Mutex::new(cfg));
 
     let main_window = MainWindow::new()?;
@@ -66,12 +77,21 @@ fn main() -> anyhow::Result<()> {
     }
     main_window.show()?;
 
-    let worker = spawn_monitor(cfg.lock().unwrap().clone(), rx, main_window.as_weak(), widget.as_weak());
+    let game_active = Arc::new(AtomicBool::new(false));
+    let (diag, diag_worker) = start_diagnostics(&cfg.lock().unwrap(), &main_window, game_active.clone());
+
+    let worker =
+        spawn_monitor(cfg.lock().unwrap().clone(), rx, main_window.as_weak(), widget.as_weak(), game_active);
 
     slint::run_event_loop_until_quit()?;
 
     let _ = tx.send(Command::Quit);
     let _ = worker.join();
+    diag.shutdown();
+    // Uma análise em andamento não é interrompida; não vale segurar o fechamento por ela.
+    if !diag.is_running() {
+        let _ = diag_worker.join();
+    }
     if let Err(e) = cfg.lock().unwrap().save() {
         log::warn!("não consegui salvar a configuração: {e:#}");
     }
@@ -128,11 +148,111 @@ fn wire_widget(widget: &WidgetWindow, main_window: &MainWindow, cfg: &Arc<Mutex<
     });
 }
 
+/// Inicia o serviço de diagnóstico profundo e liga o resultado à página de diagnóstico.
+/// O mesmo `Diagnostics` (clonado) é o que o cérebro usa em `diagnostics::tool::call`.
+fn start_diagnostics(
+    cfg: &Config,
+    main_window: &MainWindow,
+    game_active: Arc<AtomicBool>,
+) -> (Diagnostics, std::thread::JoinHandle<()>) {
+    let mw = main_window.as_weak();
+    let (diag, handle) =
+        Diagnostics::start(cfg.diagnostics.clone(), cfg.monitor.clone(), game_active, move |event| match event {
+            diagnostics::Event::Started => {
+                let _ = mw.upgrade_in_event_loop(|w| w.set_diag_running(true));
+            }
+            diagnostics::Event::Finished(report) => push_report(&mw, &report),
+        });
+
+    let d = diag.clone();
+    let mw = main_window.as_weak();
+    main_window.on_run_diagnostics(move || {
+        if let Some(w) = mw.upgrade() {
+            w.set_diag_running(true);
+        }
+        d.request();
+    });
+    (diag, handle)
+}
+
+fn run_diagnostics_cli(cfg: &Config, out: Option<&String>) -> anyhow::Result<()> {
+    let report = diagnostics::run(&cfg.diagnostics, &cfg.monitor);
+    let json = serde_json::to_string_pretty(&serde_json::json!({
+        "resumo": report.summary(),
+        "duracao_ms": report.duration_ms,
+        "problemas": report.findings,
+        "temperaturas": report.sensors,
+        "observacoes": report.notes,
+    }))?;
+    match out {
+        Some(path) => std::fs::write(path, json)?,
+        None => println!("{json}"),
+    }
+    Ok(())
+}
+
+fn severity_of(level: Level) -> i32 {
+    match level {
+        Level::Info => 0,
+        Level::Aviso => 1,
+        Level::Critico => 2,
+    }
+}
+
+fn push_report(mw: &slint::Weak<MainWindow>, r: &Report) {
+    let findings: Vec<FindingRow> = r
+        .findings
+        .iter()
+        .map(|f| FindingRow {
+            severity: severity_of(f.level),
+            category: f.category.label().into(),
+            title: f.title.clone().into(),
+            detail: f.detail.clone().into(),
+            suggestion: f.suggestion.clone().into(),
+        })
+        .collect();
+    let sensors: Vec<SensorRow> = r
+        .sensors
+        .iter()
+        .map(|s| {
+            let limit = s.limit_c.unwrap_or(90.0);
+            SensorRow {
+                label: s.label.clone().into(),
+                value: format!("{:.0} °C", s.temp_c).into(),
+                severity: if s.temp_c >= limit {
+                    2
+                } else if s.temp_c >= limit - 10.0 {
+                    1
+                } else {
+                    0
+                },
+            }
+        })
+        .collect();
+    let notes: Vec<SharedString> = r.notes.iter().map(|n| n.into()).collect();
+    let summary = r.summary();
+    let meta = format!(
+        "Concluído em {} s · {} item{} · Log de Eventos, discos, drivers e sensores",
+        format!("{:.1}", r.duration_ms as f32 / 1000.0).replace('.', ","),
+        r.findings.len(),
+        if r.findings.len() == 1 { "" } else { "s" }
+    );
+    let _ = mw.upgrade_in_event_loop(move |w| {
+        w.set_diag_running(false);
+        w.set_diag_summary(summary.into());
+        w.set_diag_meta(meta.into());
+        w.set_diag_findings(ModelRc::new(VecModel::from(findings)));
+        w.set_diag_sensors(ModelRc::new(VecModel::from(sensors)));
+        w.set_diag_notes(ModelRc::new(VecModel::from(notes)));
+    });
+}
+
 fn spawn_monitor(
     cfg: Config,
     rx: mpsc::Receiver<Command>,
     mw: slint::Weak<MainWindow>,
     wg: slint::Weak<WidgetWindow>,
+    game_active: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("monitor".into())
@@ -151,6 +271,7 @@ fn spawn_monitor(
                 }
                 state.active = active;
                 state.game = detected;
+                game_active.store(active, Ordering::Relaxed);
 
                 let snap = monitor.sample(state.active);
                 push_to_ui(&mw, &wg, snap, state.clone(), hide_widget_in_game);
