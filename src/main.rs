@@ -6,6 +6,7 @@ mod gamemode;
 mod monitor;
 #[cfg(windows)]
 mod tray;
+mod voice;
 
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -15,6 +16,7 @@ use slint::{ComponentHandle, ModelRc, PhysicalPosition, SharedString, VecModel};
 use config::Config;
 use gamemode::GameDetector;
 use monitor::{Monitor, Severity, Snapshot};
+use voice::{Voice, VoiceEvent, VoiceState};
 
 slint::include_modules!();
 
@@ -45,20 +47,31 @@ fn main() -> anyhow::Result<()> {
     let widget = WidgetWindow::new()?;
 
     // Fechar a janela principal só a esconde; a Sexta-Feira continua na bandeja.
-    main_window.window().on_close_requested(|| slint::CloseRequestResponse::HideWindow);
-    widget.window().on_close_requested(|| slint::CloseRequestResponse::HideWindow);
+    main_window
+        .window()
+        .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
+    widget
+        .window()
+        .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
 
     let (tx, rx) = mpsc::channel::<Command>();
 
-    wire_main_window(&main_window, &widget, &tx);
+    let voice = start_voice(cfg.lock().unwrap().voice.clone(), &main_window, &widget);
+
+    wire_main_window(&main_window, &widget, &tx, &voice);
     wire_widget(&widget, &main_window, &cfg);
 
     #[cfg(windows)]
-    let _tray = tray::Tray::new(&main_window, &widget, tx.clone())?;
+    let _tray = {
+        let v = voice.clone();
+        tray::Tray::new(&main_window, &widget, tx.clone(), move || v.push_to_talk())?
+    };
 
     {
         let c = cfg.lock().unwrap();
-        widget.window().set_position(PhysicalPosition::new(c.widget.x, c.widget.y));
+        widget
+            .window()
+            .set_position(PhysicalPosition::new(c.widget.x, c.widget.y));
         if c.widget.enabled {
             widget.show()?;
         }
@@ -66,10 +79,17 @@ fn main() -> anyhow::Result<()> {
     }
     main_window.show()?;
 
-    let worker = spawn_monitor(cfg.lock().unwrap().clone(), rx, main_window.as_weak(), widget.as_weak());
+    let worker = spawn_monitor(
+        cfg.lock().unwrap().clone(),
+        rx,
+        main_window.as_weak(),
+        widget.as_weak(),
+        voice.clone(),
+    );
 
     slint::run_event_loop_until_quit()?;
 
+    voice.shutdown();
     let _ = tx.send(Command::Quit);
     let _ = worker.join();
     if let Err(e) = cfg.lock().unwrap().save() {
@@ -78,10 +98,66 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn wire_main_window(main_window: &MainWindow, widget: &WidgetWindow, tx: &mpsc::Sender<Command>) {
+/// Inicia a voz e leva os eventos dela para a interface.
+fn start_voice(cfg: config::VoiceConfig, main_window: &MainWindow, widget: &WidgetWindow) -> Voice {
+    let (mw, wg) = (main_window.as_weak(), widget.as_weak());
+    // O handle da voz só existe depois do start; os eventos que precisam dele (responder) o
+    // pegam daqui.
+    let handle: Arc<Mutex<Option<Voice>>> = Arc::new(Mutex::new(None));
+    let h = handle.clone();
+    let voice = Voice::start(cfg, move |ev| {
+        if let VoiceEvent::Transcript(text) = &ev {
+            if let Some(v) = h.lock().unwrap().as_ref() {
+                on_user_text(text, v);
+            }
+        }
+        let (mw, wg) = (mw.clone(), wg.clone());
+        let _ = slint::invoke_from_event_loop(move || {
+            let (Some(mw), Some(wg)) = (mw.upgrade(), wg.upgrade()) else {
+                return;
+            };
+            match ev {
+                VoiceEvent::State(st) => {
+                    let label: SharedString = st.label().into();
+                    mw.set_voice_state(label.clone());
+                    mw.set_listening(st == VoiceState::Listening);
+                    wg.set_voice_state(label);
+                }
+                VoiceEvent::Transcript(text) => mw.set_voice_line(format!("Você: {text}").into()),
+                VoiceEvent::Info(text) => mw.set_voice_line(text.into()),
+                VoiceEvent::Error(text) => mw.set_voice_line(format!("⚠ {text}").into()),
+                VoiceEvent::WakeWord(on) => mw.set_wake_word(on),
+            }
+        });
+    });
+    *handle.lock().unwrap() = Some(voice.clone());
+    voice
+}
+
+/// Ponto único de entrada do que o usuário falou. O cérebro (etapa M2) substitui este eco
+/// pela resposta da IA e chama `voice.speak` com ela. Roda na thread de voz: trabalho demorado
+/// (como chamar o LLM) deve ir para outra thread.
+fn on_user_text(text: &str, voice: &Voice) {
+    log::info!("usuário disse: {text}");
+    voice.speak(format!("Você disse: {text}"));
+}
+
+fn wire_main_window(
+    main_window: &MainWindow,
+    widget: &WidgetWindow,
+    tx: &mpsc::Sender<Command>,
+    voice: &Voice,
+) {
+    let v = voice.clone();
+    main_window.on_push_to_talk(move || v.push_to_talk());
+    let v = voice.clone();
+    main_window.on_train_wake_word(move || v.train_wake_word());
+
     let (mw, wg) = (main_window.as_weak(), widget.as_weak());
     main_window.on_toggle_widget(move || {
-        let (Some(mw), Some(wg)) = (mw.upgrade(), wg.upgrade()) else { return };
+        let (Some(mw), Some(wg)) = (mw.upgrade(), wg.upgrade()) else {
+            return;
+        };
         toggle_widget(&mw, &wg);
     });
 
@@ -108,7 +184,10 @@ fn wire_widget(widget: &WidgetWindow, main_window: &MainWindow, cfg: &Arc<Mutex<
         let w = wg.window();
         let scale = w.scale_factor();
         let pos = w.position();
-        w.set_position(PhysicalPosition::new(pos.x + (dx * scale) as i32, pos.y + (dy * scale) as i32));
+        w.set_position(PhysicalPosition::new(
+            pos.x + (dx * scale) as i32,
+            pos.y + (dy * scale) as i32,
+        ));
     });
 
     let (wg, cfg) = (widget.as_weak(), cfg.clone());
@@ -133,6 +212,7 @@ fn spawn_monitor(
     rx: mpsc::Receiver<Command>,
     mw: slint::Weak<MainWindow>,
     wg: slint::Weak<WidgetWindow>,
+    voice: Voice,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("monitor".into())
@@ -148,6 +228,7 @@ fn spawn_monitor(
                 if active != state.active {
                     log::info!("modo jogo {}", if active { "ligado" } else { "desligado" });
                     gamemode::set_low_power(active);
+                    voice.set_game_mode(active);
                 }
                 state.active = active;
                 state.game = detected;
@@ -177,18 +258,33 @@ fn push_to_ui(
         (None, true) => "Modo jogo (manual)".to_string(),
         (None, false) => "Online e monitorando".to_string(),
     };
-    let cpu_temp = s.cpu_temp_c.map(|t| format!(" · {t:.0} °C")).unwrap_or_default();
+    let cpu_temp = s
+        .cpu_temp_c
+        .map(|t| format!(" · {t:.0} °C"))
+        .unwrap_or_default();
     let cpu_detail = format!("Uso total{cpu_temp}");
     let ram_value = format!("{:.1} GB", s.ram_used_mb as f32 / 1024.0);
-    let ram_detail = format!("de {:.1} GB ({:.0}%)", s.ram_total_mb as f32 / 1024.0, s.ram_pct());
+    let ram_detail = format!(
+        "de {:.1} GB ({:.0}%)",
+        s.ram_total_mb as f32 / 1024.0,
+        s.ram_pct()
+    );
     let (gpu_pct, gpu_value, gpu_detail, gpu_short) = match &s.gpu {
         Some(g) => (
             g.usage_pct,
             format!("{:.0}%", g.usage_pct),
-            format!("{} · {:.0} °C · {}/{} MB", g.name, g.temp_c, g.vram_used_mb, g.vram_total_mb),
+            format!(
+                "{} · {:.0} °C · {}/{} MB",
+                g.name, g.temp_c, g.vram_used_mb, g.vram_total_mb
+            ),
             format!("{:.0}% · {:.0}°C", g.usage_pct, g.temp_c),
         ),
-        None => (0.0, "—".into(), "Sem GPU NVIDIA detectada".into(), "—".into()),
+        None => (
+            0.0,
+            "—".into(),
+            "Sem GPU NVIDIA detectada".into(),
+            "—".into(),
+        ),
     };
     let self_detail = format!("Usando {} MB de RAM", s.self_mem_mb);
 
@@ -213,7 +309,13 @@ fn push_to_ui(
         })
         .collect();
     let alert_count = alerts.len() as i32;
-    let cpu_short = format!("{:.0}%{}", s.cpu_pct, s.cpu_temp_c.map(|t| format!(" · {t:.0}°C")).unwrap_or_default());
+    let cpu_short = format!(
+        "{:.0}%{}",
+        s.cpu_pct,
+        s.cpu_temp_c
+            .map(|t| format!(" · {t:.0}°C"))
+            .unwrap_or_default()
+    );
     let ram_short = format!("{:.0}%", s.ram_pct());
     let ram_pct = s.ram_pct();
 
@@ -236,7 +338,11 @@ fn push_to_ui(
 
     let mw2 = mw.clone();
     let _ = wg.upgrade_in_event_loop(move |w| {
-        w.set_status(SharedString::from(if game.active { "modo jogo" } else { "online" }));
+        w.set_status(SharedString::from(if game.active {
+            "modo jogo"
+        } else {
+            "online"
+        }));
         w.set_game_mode(game.active);
         w.set_cpu_pct(s.cpu_pct);
         w.set_ram_pct(ram_pct);
@@ -247,7 +353,11 @@ fn push_to_ui(
         w.set_alert_count(alert_count);
         if hide_widget_in_game {
             let wanted = mw2.upgrade().is_some_and(|m| m.get_widget_visible());
-            let _ = if game.active || !wanted { w.hide() } else { w.show() };
+            let _ = if game.active || !wanted {
+                w.hide()
+            } else {
+                w.show()
+            };
         }
     });
 }

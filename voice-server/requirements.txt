@@ -1,0 +1,4 @@
+numpy
+faster-whisper>=1.1
+kokoro>=0.9
+chatterbox-tts

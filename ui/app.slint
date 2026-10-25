@@ -64,8 +64,14 @@ export component MainWindow inherits Window {
     in property <string> self-detail: "—";
     in property <[AlertRow]> alerts;
     in property <[ProcessRow]> processes;
+    in property <string> voice-state;
+    in property <string> voice-line: "Diga \"Sexta-Feira\" ou aperte Ctrl+Alt+Espaço para falar.";
+    in property <bool> listening;
+    in property <bool> wake-word;
 
     callback toggle-widget();
+    callback push-to-talk();
+    callback train-wake-word();
     callback toggle-game-mode();
     callback quit();
 
@@ -166,17 +172,42 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Comando (voz e texto chegam na próxima etapa)
+        // Voz
         Panel {
-            height: 44px;
+            height: 52px;
+            border-color: root.listening ? Theme.accent : Theme.panel-border;
             HorizontalLayout {
                 padding-left: 14px;
-                padding-right: 14px;
+                padding-right: 9px;
+                spacing: 10px;
+                Rectangle {
+                    width: 10px; height: 10px; y: (parent.height - 10px) / 2; border-radius: 5px;
+                    background: root.listening ? Theme.accent : root.voice-state != "" ? Theme.warn : Theme.accent-dim;
+                }
                 Text {
-                    text: "Diga \"Sexta-Feira\" ou digite um comando (voz chega na etapa M1)";
-                    color: Theme.text-dim;
+                    text: root.voice-state != "" ? root.voice-state + "  " + root.voice-line : root.voice-line;
+                    color: root.listening ? Theme.accent : Theme.text-dim;
                     font-size: 13px;
                     vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    HudButton {
+                        text: root.wake-word ? "Treinar de novo" : "Treinar voz";
+                        min-width: 120px;
+                        clicked => { root.train-wake-word(); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    HudButton {
+                        text: root.listening ? "Parar" : "Falar";
+                        active: root.listening;
+                        min-width: 90px;
+                        clicked => { root.push-to-talk(); }
+                    }
                 }
             }
         }
@@ -192,7 +223,8 @@ export component WidgetWindow inherits Window {
     always-on-top: true;
     background: transparent;
     width: 250px;
-    height: 112px;
+    // No modo jogo vira um overlay mínimo de uma linha.
+    height: root.game-mode ? 40px : 112px;
     default-font-family: Theme.font;
 
     in property <bool> game-mode;
@@ -204,6 +236,7 @@ export component WidgetWindow inherits Window {
     in property <string> ram-text: "—";
     in property <string> gpu-text: "—";
     in property <int> alert-count;
+    in property <string> voice-state;
 
     callback drag(length, length);
     callback drag-finished();
@@ -239,7 +272,9 @@ export component WidgetWindow inherits Window {
                 }
                 Text { text: "F.R.I.D.A.Y."; color: Theme.accent; font-size: 12px; font-weight: 700; letter-spacing: 3px; }
                 Text {
-                    text: root.alert-count > 0 ? root.alert-count + " alerta(s)" : root.status;
+                    text: root.voice-state != "" ? root.voice-state
+                        : root.game-mode ? root.cpu-text + "  ·  " + root.gpu-text
+                        : root.alert-count > 0 ? root.alert-count + " alerta(s)" : root.status;
                     color: root.alert-count > 0 ? Theme.warn : Theme.text-dim;
                     font-size: 11px;
                     horizontal-alignment: right;
@@ -247,6 +282,8 @@ export component WidgetWindow inherits Window {
                     overflow: elide;
                 }
             }
+            if !root.game-mode: VerticalLayout {
+            spacing: 6px;
             for row in [
                 { label: "CPU", pct: root.cpu-pct, text: root.cpu-text },
                 { label: "RAM", pct: root.ram-pct, text: root.ram-text },
@@ -256,6 +293,7 @@ export component WidgetWindow inherits Window {
                 Text { text: row.label; color: Theme.text-dim; font-size: 11px; width: 28px; vertical-alignment: center; }
                 Bar { value: row.pct; y: 5px; horizontal-stretch: 1; }
                 Text { text: row.text; color: Theme.text; font-size: 11px; width: 70px; horizontal-alignment: right; }
+            }
             }
         }
     }

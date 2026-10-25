@@ -12,8 +12,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release
       - run: cargo build --release
+      - name: Montar pacote
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force pacote | Out-Null
+          Copy-Item target/release/sexta-feira.exe pacote/
+          Copy-Item -Recurse voice-server pacote/voice-server
       - uses: actions/upload-artifact@v4
         with:
           name: sexta-feira-windows
-          path: target/release/sexta-feira.exe
+          path: pacote/
