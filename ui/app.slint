@@ -1,0 +1,262 @@
+import { Theme, Bar, Panel, HudButton, ProcessRow, AlertRow, Load } from "theme.slint";
+
+export { ProcessRow, AlertRow }
+
+component MetricCard inherits Panel {
+    in property <string> title;
+    in property <string> value;
+    in property <string> detail;
+    in property <float> pct;
+    min-height: 110px;
+    VerticalLayout {
+        padding: 14px;
+        spacing: 6px;
+        Text { text: root.title; color: Theme.text-dim; font-size: 11px; letter-spacing: 2px; }
+        Text { text: root.value; color: Load.color(root.pct); font-size: 28px; font-weight: 600; }
+        Bar { value: root.pct; }
+        Text { text: root.detail; color: Theme.text-dim; font-size: 12px; overflow: elide; }
+    }
+}
+
+// Núcleo central estilo "reator": acende quando a Sexta-Feira está ativa.
+component Core inherits Rectangle {
+    in property <bool> game-mode;
+    width: 64px;
+    height: 64px;
+    Rectangle {
+        width: 64px; height: 64px; border-radius: 32px;
+        border-width: 2px;
+        border-color: root.game-mode ? Theme.warn : Theme.accent;
+        background: root.game-mode ? #ffb5471a : Theme.accent-dim;
+    }
+    Rectangle {
+        width: 40px; height: 40px; border-radius: 20px;
+        border-width: 1px;
+        border-color: root.game-mode ? Theme.warn : Theme.accent;
+    }
+    Rectangle {
+        width: 16px; height: 16px; border-radius: 8px;
+        background: root.game-mode ? Theme.warn : Theme.accent;
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Sexta-Feira";
+    icon: @image-url("../assets/icon.png");
+    preferred-width: 920px;
+    preferred-height: 620px;
+    min-width: 720px;
+    min-height: 520px;
+    background: Theme.bg;
+    default-font-family: Theme.font;
+
+    in property <string> status: "Online";
+    in property <bool> game-mode;
+    in property <bool> widget-visible: true;
+    in property <float> cpu-pct;
+    in property <string> cpu-detail: "—";
+    in property <float> ram-pct;
+    in property <string> ram-value: "—";
+    in property <string> ram-detail: "—";
+    in property <float> gpu-pct;
+    in property <string> gpu-value: "—";
+    in property <string> gpu-detail: "Sem GPU NVIDIA detectada";
+    in property <string> self-detail: "—";
+    in property <[AlertRow]> alerts;
+    in property <[ProcessRow]> processes;
+
+    callback toggle-widget();
+    callback toggle-game-mode();
+    callback quit();
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 16px;
+
+        // Cabeçalho
+        HorizontalLayout {
+            spacing: 16px;
+            Core { game-mode: root.game-mode; }
+            VerticalLayout {
+                alignment: center;
+                spacing: 2px;
+                Text { text: "F.R.I.D.A.Y."; color: Theme.accent; font-size: 26px; font-weight: 700; letter-spacing: 6px; }
+                Text { text: root.status; color: root.game-mode ? Theme.warn : Theme.text-dim; font-size: 13px; }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            HorizontalLayout {
+                alignment: center;
+                spacing: 8px;
+                HudButton {
+                    text: root.widget-visible ? "Ocultar widget" : "Mostrar widget";
+                    active: root.widget-visible;
+                    clicked => { root.toggle-widget(); }
+                }
+                HudButton {
+                    text: "Modo jogo";
+                    active: root.game-mode;
+                    clicked => { root.toggle-game-mode(); }
+                }
+                HudButton {
+                    text: "Sair";
+                    min-width: 70px;
+                    clicked => { root.quit(); }
+                }
+            }
+        }
+
+        // Métricas
+        HorizontalLayout {
+            spacing: 12px;
+            MetricCard { title: "CPU"; value: round(root.cpu-pct) + "%"; pct: root.cpu-pct; detail: root.cpu-detail; }
+            MetricCard { title: "MEMÓRIA"; value: root.ram-value; pct: root.ram-pct; detail: root.ram-detail; }
+            MetricCard { title: "GPU"; value: root.gpu-value; pct: root.gpu-pct; detail: root.gpu-detail; }
+            MetricCard { title: "SEXTA-FEIRA"; value: "Leve"; pct: 0; detail: root.self-detail; }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            vertical-stretch: 1;
+
+            // Alertas
+            Panel {
+                horizontal-stretch: 1;
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 8px;
+                    alignment: start;
+                    Text { text: "DIAGNÓSTICO"; color: Theme.text-dim; font-size: 11px; letter-spacing: 2px; }
+                    if root.alerts.length == 0: Text {
+                        text: "Tudo certo com o seu PC.";
+                        color: Theme.accent;
+                        font-size: 14px;
+                    }
+                    for a in root.alerts: HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            width: 8px; height: 8px; y: 5px; border-radius: 4px;
+                            background: a.severity >= 2 ? Theme.crit : a.severity == 1 ? Theme.warn : Theme.accent;
+                        }
+                        Text { text: a.message; color: Theme.text; font-size: 13px; wrap: word-wrap; horizontal-stretch: 1; }
+                    }
+                }
+            }
+
+            // Processos
+            Panel {
+                horizontal-stretch: 1;
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 8px;
+                    alignment: start;
+                    Text { text: "PROCESSOS QUE MAIS USAM MEMÓRIA"; color: Theme.text-dim; font-size: 11px; letter-spacing: 2px; }
+                    for p in root.processes: HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: p.name; color: Theme.text; font-size: 13px; overflow: elide; horizontal-stretch: 1; }
+                        Text { text: p.cpu; color: Theme.text-dim; font-size: 13px; width: 60px; horizontal-alignment: right; }
+                        Text { text: p.mem; color: Theme.accent; font-size: 13px; width: 80px; horizontal-alignment: right; }
+                    }
+                    if root.game-mode: Text {
+                        text: "Pausado durante o jogo para não consumir recursos.";
+                        color: Theme.text-dim;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        // Comando (voz e texto chegam na próxima etapa)
+        Panel {
+            height: 44px;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 14px;
+                Text {
+                    text: "Diga \"Sexta-Feira\" ou digite um comando (voz chega na etapa M1)";
+                    color: Theme.text-dim;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+// Widget flutuante: sem borda, transparente e sempre no topo. Arraste para mover,
+// clique duplo para abrir a janela principal.
+export component WidgetWindow inherits Window {
+    title: "Sexta-Feira (widget)";
+    icon: @image-url("../assets/icon.png");
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    width: 250px;
+    height: 112px;
+    default-font-family: Theme.font;
+
+    in property <bool> game-mode;
+    in property <string> status: "Online";
+    in property <float> cpu-pct;
+    in property <float> ram-pct;
+    in property <float> gpu-pct;
+    in property <string> cpu-text: "—";
+    in property <string> ram-text: "—";
+    in property <string> gpu-text: "—";
+    in property <int> alert-count;
+
+    callback drag(length, length);
+    callback drag-finished();
+    callback open-main();
+
+    Rectangle {
+        background: #05080ed9;
+        border-radius: 14px;
+        border-width: 1px;
+        border-color: root.alert-count > 0 ? Theme.warn : Theme.panel-border;
+
+        area := TouchArea {
+            mouse-cursor: move;
+            moved => {
+                root.drag(self.mouse-x - self.pressed-x, self.mouse-y - self.pressed-y);
+            }
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.up {
+                    root.drag-finished();
+                }
+            }
+            double-clicked => { root.open-main(); }
+        }
+
+        VerticalLayout {
+            padding: 12px;
+            spacing: 6px;
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle {
+                    width: 8px; height: 8px; y: 5px; border-radius: 4px;
+                    background: root.game-mode ? Theme.warn : Theme.accent;
+                }
+                Text { text: "F.R.I.D.A.Y."; color: Theme.accent; font-size: 12px; font-weight: 700; letter-spacing: 3px; }
+                Text {
+                    text: root.alert-count > 0 ? root.alert-count + " alerta(s)" : root.status;
+                    color: root.alert-count > 0 ? Theme.warn : Theme.text-dim;
+                    font-size: 11px;
+                    horizontal-alignment: right;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+            }
+            for row in [
+                { label: "CPU", pct: root.cpu-pct, text: root.cpu-text },
+                { label: "RAM", pct: root.ram-pct, text: root.ram-text },
+                { label: "GPU", pct: root.gpu-pct, text: root.gpu-text },
+            ]: HorizontalLayout {
+                spacing: 8px;
+                Text { text: row.label; color: Theme.text-dim; font-size: 11px; width: 28px; vertical-alignment: center; }
+                Bar { value: row.pct; y: 5px; horizontal-stretch: 1; }
+                Text { text: row.text; color: Theme.text; font-size: 11px; width: 70px; horizontal-alignment: right; }
+            }
+        }
+    }
+}

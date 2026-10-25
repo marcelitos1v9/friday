@@ -1,0 +1,78 @@
+// Paleta e componentes visuais no estilo HUD.
+
+export global Theme {
+    out property <color> bg: #05080e;
+    out property <color> panel: #0b1422e6;
+    out property <color> panel-border: #1d3b55;
+    out property <color> accent: #3ad7ff;
+    out property <color> accent-dim: #3ad7ff33;
+    out property <color> text: #d8f3ff;
+    out property <color> text-dim: #6f8fa6;
+    out property <color> warn: #ffb547;
+    out property <color> crit: #ff4d5e;
+    out property <length> radius: 10px;
+    out property <string> font: "Segoe UI";
+}
+
+export struct ProcessRow {
+    name: string,
+    cpu: string,
+    mem: string,
+}
+
+export struct AlertRow {
+    // 0 = info, 1 = atenção, 2 = crítico
+    severity: int,
+    message: string,
+}
+
+// Cor de acordo com a carga: ciano normal, laranja alto, vermelho crítico.
+export global Load {
+    public pure function color(pct: float) -> color {
+        return pct >= 90 ? Theme.crit : pct >= 75 ? Theme.warn : Theme.accent;
+    }
+}
+
+export component Bar inherits Rectangle {
+    in property <float> value; // 0..100
+    height: 6px;
+    border-radius: 3px;
+    background: Theme.accent-dim;
+    Rectangle {
+        x: 0;
+        width: parent.width * clamp(root.value, 0, 100) / 100;
+        border-radius: 3px;
+        background: Load.color(root.value);
+        animate width { duration: 250ms; easing: ease-out; }
+    }
+}
+
+export component Panel inherits Rectangle {
+    background: Theme.panel;
+    border-color: Theme.panel-border;
+    border-width: 1px;
+    border-radius: Theme.radius;
+}
+
+export component HudButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> active;
+    callback clicked;
+    height: 34px;
+    min-width: 120px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.active ? Theme.accent : Theme.panel-border;
+    background: touch.pressed ? Theme.accent-dim : root.active ? #3ad7ff1f : touch.has-hover ? #ffffff0d : transparent;
+    Text {
+        text: root.text;
+        color: root.active ? Theme.accent : Theme.text;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
