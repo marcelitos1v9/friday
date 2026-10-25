@@ -2,6 +2,7 @@
 //! (no Windows: `%APPDATA%\sexta-feira\config.toml`). Se o arquivo não existir, é criado
 //! com os valores padrão.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -15,6 +16,7 @@ pub struct Config {
     pub widget: WidgetConfig,
     pub voice: VoiceConfig,
     pub diagnostics: DiagnosticsConfig,
+    pub brain: BrainConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +45,39 @@ pub struct GameModeConfig {
     pub executables: Vec<String>,
     /// Esconde o widget enquanto o modo jogo estiver ativo.
     pub hide_widget: bool,
+}
+
+/// Qual LLM responde: Groq (nuvem, não pesa no PC) ou Ollama (local).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Groq,
+    Ollama,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrainConfig {
+    pub provider: Provider,
+    /// Chave da Groq. Vazia = usa a variável de ambiente `GROQ_API_KEY`.
+    pub groq_api_key: String,
+    pub groq_model: String,
+    pub groq_url: String,
+    pub ollama_url: String,
+    pub ollama_model: String,
+    /// Quanto tempo o Ollama mantém o modelo carregado depois de responder (ex.: "5m").
+    pub ollama_keep_alive: String,
+    /// No modo jogo, descarrega o modelo do Ollama da VRAM logo depois de cada resposta.
+    pub ollama_unload_in_game: bool,
+    /// Quantas mensagens anteriores vão como contexto para o LLM.
+    pub history_messages: usize,
+    /// Tempo máximo de espera pela resposta do LLM, em segundos.
+    pub timeout_s: u64,
+    /// Apelidos de apps: nome falado -> caminho, atalho ou URL (ex.: "steam://rungameid/730").
+    pub apps: BTreeMap<String, String>,
+    /// Rotinas: nome -> passos. Cada passo é uma linha, ex.: "abrir code", "volume 30",
+    /// "fechar spotify", "midia pausar", "esperar 2".
+    pub routines: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +110,7 @@ impl Default for Config {
             widget: WidgetConfig::default(),
             voice: VoiceConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
+            brain: BrainConfig::default(),
         }
     }
 }
@@ -161,6 +197,30 @@ impl Default for VoiceConfig {
             server_dir: String::new(),
             server_port: 8765,
             idle_unload_secs: 300,
+        }
+    }
+}
+
+impl Default for BrainConfig {
+    fn default() -> Self {
+        let mut routines = BTreeMap::new();
+        routines.insert(
+            "trabalho".into(),
+            vec!["abrir visual studio code".into(), "abrir chrome".into(), "volume 30".into()],
+        );
+        Self {
+            provider: Provider::Groq,
+            groq_api_key: String::new(),
+            groq_model: "openai/gpt-oss-120b".into(),
+            groq_url: "https://api.groq.com/openai/v1".into(),
+            ollama_url: "http://localhost:11434".into(),
+            ollama_model: "qwen2.5:7b".into(),
+            ollama_keep_alive: "5m".into(),
+            ollama_unload_in_game: true,
+            history_messages: 12,
+            timeout_s: 60,
+            apps: BTreeMap::new(),
+            routines,
         }
     }
 }

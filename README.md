@@ -23,7 +23,7 @@ Consumo medido em release: cerca de 25 MB de RAM e menos de 1% de CPU.
 - **Fala para texto:** Whisper da Groq (`stt = "groq"`, não usa nada do PC; precisa de `GROQ_API_KEY`) ou Whisper local (`stt = "local"`).
 - **Texto para fala:** motor de voz neural próprio, rodando no seu PC: Chatterbox Multilingual (pode clonar uma voz a partir de um WAV de 5 a 15 s) e Kokoro (leve, roda na CPU). Ela começa a falar frase por frase, sem esperar o texto todo.
 - Os modelos ficam num servidor Python separado (`voice-server/`), ligado só quando precisa e desligado depois de 5 minutos sem uso.
-- Por enquanto ela repete o que entendeu ("Você disse: ..."). O cérebro com Groq/Ollama (M2) vai responder de verdade.
+- O que você fala vai para o mesmo caminho da caixa **Conversa**: o cérebro responde e a resposta (e os lembretes) saem falados.
 
 ### Modo jogo (M3)
 
@@ -57,7 +57,27 @@ sexta-feira.exe --diagnostico diagnostico.json
 
 O cérebro usa a ferramenta `diagnosticar_pc` de `src/diagnostics/tool.rs`: `tool::definition()` vai na lista de ferramentas do modelo e `tool::call(&diag, &input)` devolve o resultado.
 
-Consumo medido em release: cerca de 22 MB de RAM e 0,2% de CPU.
+## Cérebro e ações (etapa M2)
+
+Digite na caixa **Conversa** da janela principal (a voz da etapa M1 usa o mesmo caminho). Exemplos:
+
+| Pedido | O que acontece |
+|---|---|
+| "abre o discord", "abre o counter strike" | Procura no Menu Iniciar, na Área de Trabalho, nos jogos da Steam e nos seus apelidos |
+| "volume 30", "aumenta o volume", "muta" | Volume geral do Windows |
+| "pausa", "próxima", "música anterior" | Teclas de mídia (Spotify, YouTube, etc.) |
+| "me lembra de tirar a pizza em 20 minutos", "me avisa amanhã às 9h de pagar a conta" | Lembrete salvo no SQLite; quando vence aparece na conversa e no widget, sem roubar o foco do jogo |
+| "modo trabalho" | Roda uma rotina do `config.toml` |
+| "fecha o programa que travou", "fecha o chrome" | Pergunta antes e só fecha depois do "sim" |
+| "como está meu PC?", "por que está lento?" | O LLM lê as métricas do monitor e responde |
+| "eu jogo CS2 toda noite" | O LLM guarda o fato e usa nas próximas conversas |
+
+Comandos simples (volume, mídia, abrir app, lembretes, rotinas, hora) são resolvidos **sem LLM**, na hora e sem rede. O resto vai para o LLM com ferramentas:
+
+- **Groq** (padrão): coloque a chave em `brain.groq_api_key` ou na variável `GROQ_API_KEY`. Não usa nada do PC, ideal enquanto joga.
+- **Ollama** (local): `brain.provider = "ollama"` e `ollama pull qwen2.5:7b`. No modo jogo o modelo é descarregado da VRAM depois de cada resposta.
+
+O histórico, os fatos e os lembretes ficam em `%APPDATA%\sexta-feira\data\memoria.db`.
 
 ## Compilar
 
@@ -108,6 +128,32 @@ Na primeira execução é criado `%APPDATA%\sexta-feira\config\config.toml`:
 | `diagnostics.startup_delay_s` | 180 | Espera após abrir antes do primeiro diagnóstico automático |
 | `diagnostics.event_days` | 7 | Dias do Log de Eventos analisados |
 | `diagnostics.old_driver_years` | 3 | Idade a partir da qual drivers de rede, áudio, chipset etc. aparecem |
+| `brain.provider` | `"groq"` | `"groq"` ou `"ollama"` |
+| `brain.groq_api_key` | vazio | Chave da Groq (vazio = usa `GROQ_API_KEY`) |
+| `brain.groq_model` | `openai/gpt-oss-120b` | Qualquer modelo da Groq com suporte a ferramentas |
+| `brain.ollama_url` | `http://localhost:11434` | Endereço do Ollama |
+| `brain.ollama_model` | `qwen2.5:7b` | Modelo local com suporte a ferramentas |
+| `brain.ollama_keep_alive` | `"5m"` | Quanto tempo o modelo fica na memória fora do jogo |
+| `brain.ollama_unload_in_game` | true | Tira o modelo da VRAM durante o jogo |
+| `brain.history_messages` | 12 | Mensagens anteriores enviadas como contexto |
+| `brain.apps` | vazio | Apelidos: `"cs" = "steam://rungameid/730"` |
+| `brain.routines` | `trabalho` | Rotinas: lista de passos como `"abrir code"`, `"volume 30"`, `"fechar spotify"`, `"esperar 2"` |
+
+Exemplo:
+
+```toml
+[brain]
+provider = "groq"
+groq_api_key = "gsk_..."
+
+[brain.apps]
+cs = "steam://rungameid/730"
+"meu servidor" = "C:\\Users\\voce\\servidor.bat"
+
+[brain.routines]
+trabalho = ["abrir visual studio code", "abrir chrome", "volume 30"]
+jogatina = ["fechar chrome", "abrir discord", "abrir steam", "volume 60"]
+```
 
 ## Estrutura
 
@@ -121,10 +167,12 @@ Na primeira execução é criado `%APPDATA%\sexta-feira\config\config.toml`:
 | `voice-server/` | Servidor Python com Whisper, Chatterbox e Kokoro |
 | `src/diagnostics/` | Diagnóstico profundo: coleta (`collect/`), regras (`rules.rs`), ferramenta do cérebro (`tool.rs`) |
 | `src/config.rs` | Leitura e gravação do `config.toml` |
+| `src/brain/` | Cérebro: atalho sem LLM (`quick.rs`), Groq/Ollama (`llm.rs`), ferramentas (`tools.rs`), SQLite (`memory.rs`), lembretes (`reminders.rs`) |
+| `src/actions/` | Ações no Windows: apps e jogos, volume, mídia, programas travados |
 | `ui/*.slint` | Interface (Slint) |
 
 ## Próximas etapas
 
-- **M2 Cérebro e ações:** LLM com ferramentas para abrir apps, controlar volume e mídia, lembretes e rotinas.
-- **M4 Diagnóstico:** Log de Eventos do Windows, SMART dos discos e drivers.
-- **M3 Modo jogo:** medir o impacto real em FPS e ajustar.
+- Calibrar a palavra de ativação e os modelos de voz num PC real.
+- Medir o impacto real em FPS durante jogos e ajustar o modo jogo.
+- Integração com Google Agenda para os eventos.

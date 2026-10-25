@@ -1,6 +1,8 @@
 // Em release no Windows o app roda sem janela de console.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod actions;
+mod brain;
 mod config;
 mod diagnostics;
 mod gamemode;
@@ -9,12 +11,15 @@ mod monitor;
 mod tray;
 mod voice;
 
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
-use slint::{ComponentHandle, ModelRc, PhysicalPosition, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, PhysicalPosition, SharedString, VecModel};
 
+use brain::{Brain, BrainEvent, SharedStatus};
 use config::Config;
 use diagnostics::{Diagnostics, Level, Report};
 use gamemode::GameDetector;
@@ -67,7 +72,27 @@ fn main() -> anyhow::Result<()> {
 
     let (tx, rx) = mpsc::channel::<Command>();
 
-    let voice = start_voice(cfg.lock().unwrap().voice.clone(), &main_window, &widget);
+    let status: SharedStatus = Arc::new(Mutex::new(None));
+    let chat = Rc::new(VecModel::<ChatLine>::default());
+    main_window.set_chat(ModelRc::from(chat.clone()));
+
+    // A voz entrega o que foi falado ao cérebro, e o cérebro responde pela voz. Um precisa do
+    // outro, então a voz recebe o cérebro por este espaço preenchido logo em seguida.
+    let game_active = Arc::new(AtomicBool::new(false));
+    let (diag, diag_worker) = start_diagnostics(&cfg.lock().unwrap(), &main_window, game_active.clone());
+
+    let brain_slot: Arc<OnceLock<Brain>> = Arc::new(OnceLock::new());
+    let voice = start_voice(cfg.lock().unwrap().voice.clone(), &main_window, &widget, brain_slot.clone());
+    let brain = start_brain(&cfg.lock().unwrap(), status.clone(), diag.clone(), &main_window, &widget, voice.clone());
+    let _ = brain_slot.set(brain.clone());
+    {
+        let (brain, mw) = (brain.clone(), main_window.as_weak());
+        main_window.on_send_text(move |text| {
+            if let Some(mw) = mw.upgrade() {
+                on_user_text(&brain, &mw, text.as_str());
+            }
+        });
+    }
 
     wire_main_window(&main_window, &widget, &tx, &voice);
     wire_widget(&widget, &main_window, &cfg);
@@ -90,21 +115,21 @@ fn main() -> anyhow::Result<()> {
     }
     main_window.show()?;
 
-    let game_active = Arc::new(AtomicBool::new(false));
-    let (diag, diag_worker) = start_diagnostics(&cfg.lock().unwrap(), &main_window, game_active.clone());
-
     let worker = spawn_monitor(
         cfg.lock().unwrap().clone(),
         rx,
         main_window.as_weak(),
         widget.as_weak(),
         game_active,
+        status,
         voice.clone(),
+        brain.clone(),
     );
 
     slint::run_event_loop_until_quit()?;
 
     voice.shutdown();
+    brain.shutdown();
     let _ = tx.send(Command::Quit);
     let _ = worker.join();
     diag.shutdown();
@@ -119,19 +144,15 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Inicia a voz e leva os eventos dela para a interface.
-fn start_voice(cfg: config::VoiceConfig, main_window: &MainWindow, widget: &WidgetWindow) -> Voice {
+fn start_voice(
+    cfg: config::VoiceConfig,
+    main_window: &MainWindow,
+    widget: &WidgetWindow,
+    brain: Arc<OnceLock<Brain>>,
+) -> Voice {
     let (mw, wg) = (main_window.as_weak(), widget.as_weak());
-    // O handle da voz só existe depois do start; os eventos que precisam dele (responder) o
-    // pegam daqui.
-    let handle: Arc<Mutex<Option<Voice>>> = Arc::new(Mutex::new(None));
-    let h = handle.clone();
-    let voice = Voice::start(cfg, move |ev| {
-        if let VoiceEvent::Transcript(text) = &ev {
-            if let Some(v) = h.lock().unwrap().as_ref() {
-                on_user_text(text, v);
-            }
-        }
-        let (mw, wg) = (mw.clone(), wg.clone());
+    Voice::start(cfg, move |ev| {
+        let (mw, wg, brain) = (mw.clone(), wg.clone(), brain.clone());
         let _ = slint::invoke_from_event_loop(move || {
             let (Some(mw), Some(wg)) = (mw.upgrade(), wg.upgrade()) else {
                 return;
@@ -143,23 +164,90 @@ fn start_voice(cfg: config::VoiceConfig, main_window: &MainWindow, widget: &Widg
                     mw.set_listening(st == VoiceState::Listening);
                     wg.set_voice_state(label);
                 }
-                VoiceEvent::Transcript(text) => mw.set_voice_line(format!("Você: {text}").into()),
+                VoiceEvent::Transcript(text) => {
+                    mw.set_voice_line(format!("Você: {text}").into());
+                    if let Some(brain) = brain.get() {
+                        on_user_text(brain, &mw, &text);
+                    }
+                }
                 VoiceEvent::Info(text) => mw.set_voice_line(text.into()),
                 VoiceEvent::Error(text) => mw.set_voice_line(format!("⚠ {text}").into()),
                 VoiceEvent::WakeWord(on) => mw.set_wake_word(on),
             }
         });
-    });
-    *handle.lock().unwrap() = Some(voice.clone());
-    voice
+    })
 }
 
-/// Ponto único de entrada do que o usuário falou. O cérebro (etapa M2) substitui este eco
-/// pela resposta da IA e chama `voice.speak` com ela. Roda na thread de voz: trabalho demorado
-/// (como chamar o LLM) deve ir para outra thread.
-fn on_user_text(text: &str, voice: &Voice) {
-    log::info!("usuário disse: {text}");
-    voice.speak(format!("Você disse: {text}"));
+const CHAT_LINES: usize = 6;
+
+fn push_chat(mw: &MainWindow, from_user: bool, text: &str) {
+    let model = mw.get_chat();
+    let Some(chat) = model.as_any().downcast_ref::<VecModel<ChatLine>>() else { return };
+    chat.push(ChatLine { from_user, text: text.into() });
+    while chat.row_count() > CHAT_LINES {
+        chat.remove(0);
+    }
+}
+
+/// Ponto único de entrada de texto do usuário: digitado na janela ou transcrito pela voz.
+pub fn on_user_text(brain: &Brain, mw: &MainWindow, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    push_chat(mw, true, text);
+    brain.ask(text);
+}
+
+/// Ponto único de saída: tudo o que a Sexta-Feira responde passa por aqui (e, com a voz, é falado).
+fn on_brain_event(mw: &MainWindow, wg: &WidgetWindow, voice: &Voice, ev: BrainEvent) {
+    match ev {
+        BrainEvent::Thinking => mw.set_thinking(true),
+        BrainEvent::Reply(text) => {
+            mw.set_thinking(false);
+            if !text.is_empty() {
+                push_chat(mw, false, &text);
+                voice.speak(text);
+            }
+        }
+        BrainEvent::Error(text) => {
+            mw.set_thinking(false);
+            if !text.is_empty() {
+                push_chat(mw, false, &text);
+            }
+        }
+        BrainEvent::Reminder(text) => {
+            push_chat(mw, false, &format!("Lembrete: {text}"));
+            voice.speak(format!("Lembrete: {text}"));
+            // Avisa no widget sem roubar o foco (pode estar no meio de um jogo).
+            wg.set_notice(format!("⏰ {text}").into());
+            let wg = wg.as_weak();
+            slint::Timer::single_shot(Duration::from_secs(90), move || {
+                if let Some(wg) = wg.upgrade() {
+                    wg.set_notice(SharedString::new());
+                }
+            });
+        }
+    }
+}
+
+fn start_brain(
+    cfg: &Config,
+    status: SharedStatus,
+    diag: Diagnostics,
+    mw: &MainWindow,
+    wg: &WidgetWindow,
+    voice: Voice,
+) -> Brain {
+    let (mw, wg) = (mw.as_weak(), wg.as_weak());
+    Brain::start(cfg.brain.clone(), status, Some(diag), move |ev| {
+        let (mw, wg, voice) = (mw.clone(), wg.clone(), voice.clone());
+        let _ = slint::invoke_from_event_loop(move || {
+            if let (Some(mw), Some(wg)) = (mw.upgrade(), wg.upgrade()) {
+                on_brain_event(&mw, &wg, &voice, ev);
+            }
+        });
+    })
 }
 
 fn wire_main_window(
@@ -332,7 +420,9 @@ fn spawn_monitor(
     mw: slint::Weak<MainWindow>,
     wg: slint::Weak<WidgetWindow>,
     game_active: Arc<AtomicBool>,
+    status: SharedStatus,
     voice: Voice,
+    brain: Brain,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("monitor".into())
@@ -349,12 +439,14 @@ fn spawn_monitor(
                     log::info!("modo jogo {}", if active { "ligado" } else { "desligado" });
                     gamemode::set_low_power(active);
                     voice.set_game_mode(active);
+                    brain.set_game_mode(active);
                 }
                 state.active = active;
                 state.game = detected;
                 game_active.store(active, Ordering::Relaxed);
 
                 let snap = monitor.sample(state.active);
+                *status.lock().unwrap() = Some(snap.clone());
                 push_to_ui(&mw, &wg, snap, state.clone(), hide_widget_in_game);
 
                 match rx.recv_timeout(monitor.interval(state.active)) {
