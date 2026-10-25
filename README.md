@@ -14,6 +14,28 @@ Assistente pessoal para Windows inspirado na Sexta-Feira do Homem de Ferro. É u
 
 Consumo medido em release: cerca de 22 MB de RAM e 0,2% de CPU.
 
+## Cérebro e ações (etapa M2)
+
+Digite na caixa **Conversa** da janela principal (a voz da etapa M1 usa o mesmo caminho). Exemplos:
+
+| Pedido | O que acontece |
+|---|---|
+| "abre o discord", "abre o counter strike" | Procura no Menu Iniciar, na Área de Trabalho, nos jogos da Steam e nos seus apelidos |
+| "volume 30", "aumenta o volume", "muta" | Volume geral do Windows |
+| "pausa", "próxima", "música anterior" | Teclas de mídia (Spotify, YouTube, etc.) |
+| "me lembra de tirar a pizza em 20 minutos", "me avisa amanhã às 9h de pagar a conta" | Lembrete salvo no SQLite; quando vence aparece na conversa e no widget, sem roubar o foco do jogo |
+| "modo trabalho" | Roda uma rotina do `config.toml` |
+| "fecha o programa que travou", "fecha o chrome" | Pergunta antes e só fecha depois do "sim" |
+| "como está meu PC?", "por que está lento?" | O LLM lê as métricas do monitor e responde |
+| "eu jogo CS2 toda noite" | O LLM guarda o fato e usa nas próximas conversas |
+
+Comandos simples (volume, mídia, abrir app, lembretes, rotinas, hora) são resolvidos **sem LLM**, na hora e sem rede. O resto vai para o LLM com ferramentas:
+
+- **Groq** (padrão): coloque a chave em `brain.groq_api_key` ou na variável `GROQ_API_KEY`. Não usa nada do PC, ideal enquanto joga.
+- **Ollama** (local): `brain.provider = "ollama"` e `ollama pull qwen2.5:7b`. No modo jogo o modelo é descarregado da VRAM depois de cada resposta.
+
+O histórico, os fatos e os lembretes ficam em `%APPDATA%\sexta-feira\data\memoria.db`.
+
 ## Compilar
 
 Pré-requisito: [Rust](https://rustup.rs) estável.
@@ -47,6 +69,32 @@ Na primeira execução é criado `%APPDATA%\sexta-feira\config\config.toml`:
 | `game_mode.detect_fullscreen` | true | Trata qualquer janela em tela cheia como jogo |
 | `game_mode.executables` | lista de jogos populares | Executáveis que sempre ligam o modo jogo |
 | `game_mode.hide_widget` | false | Esconde o widget durante o jogo |
+| `brain.provider` | `"groq"` | `"groq"` ou `"ollama"` |
+| `brain.groq_api_key` | vazio | Chave da Groq (vazio = usa `GROQ_API_KEY`) |
+| `brain.groq_model` | `openai/gpt-oss-120b` | Qualquer modelo da Groq com suporte a ferramentas |
+| `brain.ollama_url` | `http://localhost:11434` | Endereço do Ollama |
+| `brain.ollama_model` | `qwen2.5:7b` | Modelo local com suporte a ferramentas |
+| `brain.ollama_keep_alive` | `"5m"` | Quanto tempo o modelo fica na memória fora do jogo |
+| `brain.ollama_unload_in_game` | true | Tira o modelo da VRAM durante o jogo |
+| `brain.history_messages` | 12 | Mensagens anteriores enviadas como contexto |
+| `brain.apps` | vazio | Apelidos: `"cs" = "steam://rungameid/730"` |
+| `brain.routines` | `trabalho` | Rotinas: lista de passos como `"abrir code"`, `"volume 30"`, `"fechar spotify"`, `"esperar 2"` |
+
+Exemplo:
+
+```toml
+[brain]
+provider = "groq"
+groq_api_key = "gsk_..."
+
+[brain.apps]
+cs = "steam://rungameid/730"
+"meu servidor" = "C:\\Users\\voce\\servidor.bat"
+
+[brain.routines]
+trabalho = ["abrir visual studio code", "abrir chrome", "volume 30"]
+jogatina = ["fechar chrome", "abrir discord", "abrir steam", "volume 60"]
+```
 
 ## Estrutura
 
@@ -57,11 +105,12 @@ Na primeira execução é criado `%APPDATA%\sexta-feira\config\config.toml`:
 | `src/gamemode.rs` | Detecção de jogo e economia de energia (EcoQoS) |
 | `src/tray.rs` | Bandeja e atalho global (só Windows) |
 | `src/config.rs` | Leitura e gravação do `config.toml` |
+| `src/brain/` | Cérebro: atalho sem LLM (`quick.rs`), Groq/Ollama (`llm.rs`), ferramentas (`tools.rs`), SQLite (`memory.rs`), lembretes (`reminders.rs`) |
+| `src/actions/` | Ações no Windows: apps e jogos, volume, mídia, programas travados |
 | `ui/*.slint` | Interface (Slint) |
 
 ## Próximas etapas
 
 - **M1 Voz:** palavra de ativação "Sexta-Feira", Whisper local e motor de voz neural próprio (Chatterbox Multilingual, Kokoro no modo jogo).
-- **M2 Cérebro e ações:** LLM com ferramentas para abrir apps, controlar volume e mídia, lembretes e rotinas.
 - **M3 Modo jogo:** medir o impacto real em FPS e ajustar.
 - **M4 Diagnóstico:** Log de Eventos do Windows, SMART dos discos e drivers.

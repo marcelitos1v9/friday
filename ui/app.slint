@@ -1,6 +1,6 @@
-import { Theme, Bar, Panel, HudButton, ProcessRow, AlertRow, Load } from "theme.slint";
+import { Theme, Bar, Panel, HudButton, ProcessRow, AlertRow, ChatLine, Load } from "theme.slint";
 
-export { ProcessRow, AlertRow }
+export { ProcessRow, AlertRow, ChatLine }
 
 component MetricCard inherits Panel {
     in property <string> title;
@@ -44,9 +44,9 @@ export component MainWindow inherits Window {
     title: "Sexta-Feira";
     icon: @image-url("../assets/icon.png");
     preferred-width: 920px;
-    preferred-height: 620px;
+    preferred-height: 760px;
     min-width: 720px;
-    min-height: 520px;
+    min-height: 640px;
     background: Theme.bg;
     default-font-family: Theme.font;
 
@@ -64,7 +64,11 @@ export component MainWindow inherits Window {
     in property <string> self-detail: "—";
     in property <[AlertRow]> alerts;
     in property <[ProcessRow]> processes;
+    // Últimas falas da conversa (a mais nova por último).
+    in property <[ChatLine]> chat;
+    in property <bool> thinking;
 
+    callback send-text(string);
     callback toggle-widget();
     callback toggle-game-mode();
     callback quit();
@@ -166,17 +170,71 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Comando (voz e texto chegam na próxima etapa)
+        // Conversa e comando por texto (a voz usa o mesmo caminho)
         Panel {
-            height: 44px;
-            HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 14px;
-                Text {
-                    text: "Diga \"Sexta-Feira\" ou digite um comando (voz chega na etapa M1)";
-                    color: Theme.text-dim;
-                    font-size: 13px;
-                    vertical-alignment: center;
+            min-height: 200px;
+            VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+                Text { text: "CONVERSA"; color: Theme.text-dim; font-size: 11px; letter-spacing: 2px; }
+                VerticalLayout {
+                    vertical-stretch: 1;
+                    alignment: end;
+                    spacing: 4px;
+                    if root.chat.length == 0: Text {
+                        text: "Experimente: \"abre o discord\", \"volume 30\", \"me lembra de beber água em 20 minutos\" ou \"modo trabalho\".";
+                        color: Theme.text-dim;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+                    for line in root.chat: HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: line.from-user ? "VOCÊ" : "SEXTA";
+                            color: line.from-user ? Theme.text-dim : Theme.accent;
+                            font-size: 11px;
+                            font-weight: 700;
+                            width: 48px;
+                        }
+                        Text {
+                            text: line.text;
+                            color: line.from-user ? Theme.text-dim : Theme.text;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    if root.thinking: Text { text: "Pensando…"; color: Theme.accent; font-size: 12px; }
+                }
+                Rectangle {
+                    height: 36px;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: input.has-focus ? Theme.accent : Theme.panel-border;
+                    background: #ffffff08;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        input := TextInput {
+                            color: Theme.text;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                            single-line: true;
+                            accepted => {
+                                if self.text != "" {
+                                    root.send-text(self.text);
+                                    self.text = "";
+                                }
+                            }
+                        }
+                    }
+                    if input.text == "": Text {
+                        x: 12px;
+                        text: "Digite um comando e aperte Enter";
+                        color: Theme.text-dim;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }
@@ -204,6 +262,8 @@ export component WidgetWindow inherits Window {
     in property <string> ram-text: "—";
     in property <string> gpu-text: "—";
     in property <int> alert-count;
+    // Aviso curto (ex.: lembrete que venceu) que aparece no lugar do status.
+    in property <string> notice;
 
     callback drag(length, length);
     callback drag-finished();
@@ -239,8 +299,8 @@ export component WidgetWindow inherits Window {
                 }
                 Text { text: "F.R.I.D.A.Y."; color: Theme.accent; font-size: 12px; font-weight: 700; letter-spacing: 3px; }
                 Text {
-                    text: root.alert-count > 0 ? root.alert-count + " alerta(s)" : root.status;
-                    color: root.alert-count > 0 ? Theme.warn : Theme.text-dim;
+                    text: root.notice != "" ? root.notice : root.alert-count > 0 ? root.alert-count + " alerta(s)" : root.status;
+                    color: root.notice != "" ? Theme.accent : root.alert-count > 0 ? Theme.warn : Theme.text-dim;
                     font-size: 11px;
                     horizontal-alignment: right;
                     horizontal-stretch: 1;

@@ -1,17 +1,22 @@
 // Em release no Windows o app roda sem janela de console.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod actions;
+mod brain;
 mod config;
 mod gamemode;
 mod monitor;
 #[cfg(windows)]
 mod tray;
 
+use std::rc::Rc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use slint::{ComponentHandle, ModelRc, PhysicalPosition, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, PhysicalPosition, SharedString, VecModel};
 
+use brain::{Brain, BrainEvent, SharedStatus};
 use config::Config;
 use gamemode::GameDetector;
 use monitor::{Monitor, Severity, Snapshot};
@@ -50,6 +55,19 @@ fn main() -> anyhow::Result<()> {
 
     let (tx, rx) = mpsc::channel::<Command>();
 
+    let status: SharedStatus = Arc::new(Mutex::new(None));
+    let chat = Rc::new(VecModel::<ChatLine>::default());
+    main_window.set_chat(ModelRc::from(chat.clone()));
+    let brain = start_brain(&cfg.lock().unwrap(), status.clone(), &main_window, &widget);
+    {
+        let (brain, mw) = (brain.clone(), main_window.as_weak());
+        main_window.on_send_text(move |text| {
+            if let Some(mw) = mw.upgrade() {
+                on_user_text(&brain, &mw, text.as_str());
+            }
+        });
+    }
+
     wire_main_window(&main_window, &widget, &tx);
     wire_widget(&widget, &main_window, &cfg);
 
@@ -66,16 +84,81 @@ fn main() -> anyhow::Result<()> {
     }
     main_window.show()?;
 
-    let worker = spawn_monitor(cfg.lock().unwrap().clone(), rx, main_window.as_weak(), widget.as_weak());
+    let worker = spawn_monitor(
+        cfg.lock().unwrap().clone(),
+        rx,
+        main_window.as_weak(),
+        widget.as_weak(),
+        status,
+        brain.clone(),
+    );
 
     slint::run_event_loop_until_quit()?;
 
+    brain.shutdown();
     let _ = tx.send(Command::Quit);
     let _ = worker.join();
     if let Err(e) = cfg.lock().unwrap().save() {
         log::warn!("não consegui salvar a configuração: {e:#}");
     }
     Ok(())
+}
+
+const CHAT_LINES: usize = 6;
+
+fn push_chat(mw: &MainWindow, from_user: bool, text: &str) {
+    let model = mw.get_chat();
+    let Some(chat) = model.as_any().downcast_ref::<VecModel<ChatLine>>() else { return };
+    chat.push(ChatLine { from_user, text: text.into() });
+    while chat.row_count() > CHAT_LINES {
+        chat.remove(0);
+    }
+}
+
+/// Ponto único de entrada de texto do usuário: digitado na janela ou transcrito pela voz.
+pub fn on_user_text(brain: &Brain, mw: &MainWindow, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    push_chat(mw, true, text);
+    brain.ask(text);
+}
+
+/// Ponto único de saída: tudo o que a Sexta-Feira responde passa por aqui (e, com a voz, é falado).
+fn on_brain_event(mw: &MainWindow, wg: &WidgetWindow, ev: BrainEvent) {
+    match ev {
+        BrainEvent::Thinking => mw.set_thinking(true),
+        BrainEvent::Reply(text) | BrainEvent::Error(text) => {
+            mw.set_thinking(false);
+            if !text.is_empty() {
+                push_chat(mw, false, &text);
+            }
+        }
+        BrainEvent::Reminder(text) => {
+            push_chat(mw, false, &format!("Lembrete: {text}"));
+            // Avisa no widget sem roubar o foco (pode estar no meio de um jogo).
+            wg.set_notice(format!("⏰ {text}").into());
+            let wg = wg.as_weak();
+            slint::Timer::single_shot(Duration::from_secs(90), move || {
+                if let Some(wg) = wg.upgrade() {
+                    wg.set_notice(SharedString::new());
+                }
+            });
+        }
+    }
+}
+
+fn start_brain(cfg: &Config, status: SharedStatus, mw: &MainWindow, wg: &WidgetWindow) -> Brain {
+    let (mw, wg) = (mw.as_weak(), wg.as_weak());
+    Brain::start(cfg.brain.clone(), status, move |ev| {
+        let (mw, wg) = (mw.clone(), wg.clone());
+        let _ = slint::invoke_from_event_loop(move || {
+            if let (Some(mw), Some(wg)) = (mw.upgrade(), wg.upgrade()) {
+                on_brain_event(&mw, &wg, ev);
+            }
+        });
+    })
 }
 
 fn wire_main_window(main_window: &MainWindow, widget: &WidgetWindow, tx: &mpsc::Sender<Command>) {
@@ -133,6 +216,8 @@ fn spawn_monitor(
     rx: mpsc::Receiver<Command>,
     mw: slint::Weak<MainWindow>,
     wg: slint::Weak<WidgetWindow>,
+    status: SharedStatus,
+    brain: Brain,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("monitor".into())
@@ -148,11 +233,13 @@ fn spawn_monitor(
                 if active != state.active {
                     log::info!("modo jogo {}", if active { "ligado" } else { "desligado" });
                     gamemode::set_low_power(active);
+                    brain.set_game_mode(active);
                 }
                 state.active = active;
                 state.game = detected;
 
                 let snap = monitor.sample(state.active);
+                *status.lock().unwrap() = Some(snap.clone());
                 push_to_ui(&mw, &wg, snap, state.clone(), hide_widget_in_game);
 
                 match rx.recv_timeout(monitor.interval(state.active)) {
