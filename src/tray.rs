@@ -1,4 +1,5 @@
-//! Ícone na bandeja do Windows e atalho global (Ctrl+Alt+F abre a Sexta-Feira).
+//! Ícone na bandeja do Windows e atalhos globais: Ctrl+Alt+F abre a Sexta-Feira e
+//! Ctrl+Alt+Espaço fala com ela (push-to-talk, funciona até dentro de jogos).
 //!
 //! Os eventos chegam por callbacks, sem nenhum timer de polling.
 
@@ -18,13 +19,24 @@ pub struct Tray {
 }
 
 impl Tray {
-    pub fn new(main_window: &MainWindow, widget: &WidgetWindow, tx: Sender<Command>) -> anyhow::Result<Self> {
+    pub fn new(
+        main_window: &MainWindow,
+        widget: &WidgetWindow,
+        tx: Sender<Command>,
+        on_push_to_talk: impl Fn() + Send + Sync + 'static,
+    ) -> anyhow::Result<Self> {
         let open = MenuItem::new("Abrir Sexta-Feira", true, None);
         let toggle_w = MenuItem::new("Mostrar/ocultar widget", true, None);
         let game = MenuItem::new("Alternar modo jogo", true, None);
         let quit = MenuItem::new("Sair", true, None);
         let menu = Menu::new();
-        menu.append_items(&[&open, &toggle_w, &game, &PredefinedMenuItem::separator(), &quit])?;
+        menu.append_items(&[
+            &open,
+            &toggle_w,
+            &game,
+            &PredefinedMenuItem::separator(),
+            &quit,
+        ])?;
 
         let icon = TrayIconBuilder::new()
             .with_tooltip("Sexta-Feira")
@@ -33,8 +45,12 @@ impl Tray {
             .with_menu_on_left_click(false)
             .build()?;
 
-        let (open_id, toggle_id, game_id, quit_id) =
-            (open.id().clone(), toggle_w.id().clone(), game.id().clone(), quit.id().clone());
+        let (open_id, toggle_id, game_id, quit_id) = (
+            open.id().clone(),
+            toggle_w.id().clone(),
+            game.id().clone(),
+            quit.id().clone(),
+        );
         let (mw, wg) = (main_window.as_weak(), widget.as_weak());
         MenuEvent::set_event_handler(Some(move |ev: MenuEvent| {
             let id = ev.id;
@@ -43,7 +59,8 @@ impl Tray {
                 return;
             }
             let (mw, wg) = (mw.clone(), wg.clone());
-            let (open_id, toggle_id, quit_id) = (open_id.clone(), toggle_id.clone(), quit_id.clone());
+            let (open_id, toggle_id, quit_id) =
+                (open_id.clone(), toggle_id.clone(), quit_id.clone());
             let _ = slint::invoke_from_event_loop(move || {
                 if id == quit_id {
                     let _ = slint::quit_event_loop();
@@ -62,7 +79,11 @@ impl Tray {
         // Clique esquerdo no ícone abre a janela principal.
         let mw = main_window.as_weak();
         TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, .. } = ev {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                ..
+            } = ev
+            {
                 let mw = mw.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(m) = mw.upgrade() {
@@ -72,21 +93,37 @@ impl Tray {
             }
         }));
 
-        let hotkeys = register_hotkey(main_window);
-        Ok(Self { _icon: icon, _hotkeys: hotkeys })
+        let hotkeys = register_hotkeys(main_window, on_push_to_talk);
+        Ok(Self {
+            _icon: icon,
+            _hotkeys: hotkeys,
+        })
     }
 }
 
-fn register_hotkey(main_window: &MainWindow) -> Option<GlobalHotKeyManager> {
+fn register_hotkeys(
+    main_window: &MainWindow,
+    on_push_to_talk: impl Fn() + Send + Sync + 'static,
+) -> Option<GlobalHotKeyManager> {
     let manager = GlobalHotKeyManager::new().ok()?;
-    let hotkey = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyF);
-    if let Err(e) = manager.register(hotkey) {
-        log::warn!("atalho Ctrl+Alt+F indisponível: {e}");
-        return None;
+    let open = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyF);
+    let talk = HotKey::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space);
+    for (hk, name) in [(open, "Ctrl+Alt+F"), (talk, "Ctrl+Alt+Espaço")] {
+        if let Err(e) = manager.register(hk) {
+            log::warn!("atalho {name} indisponível: {e}");
+        }
     }
+    let (open_id, talk_id) = (open.id(), talk.id());
     let mw = main_window.as_weak();
     GlobalHotKeyEvent::set_event_handler(Some(move |ev: GlobalHotKeyEvent| {
         if ev.state != HotKeyState::Pressed {
+            return;
+        }
+        if ev.id == talk_id {
+            on_push_to_talk();
+            return;
+        }
+        if ev.id != open_id {
             return;
         }
         let mw = mw.clone();

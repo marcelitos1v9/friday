@@ -12,8 +12,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release
       - run: cargo build --release
+      # Roda o diagnóstico profundo de verdade numa máquina Windows para validar os coletores.
+      - name: Diagnóstico (smoke test)
+        shell: pwsh
+        run: |
+          # O .exe de release é um app de janela: Start-Process -Wait espera ele terminar.
+          $p = Start-Process -FilePath ./target/release/sexta-feira.exe -ArgumentList '--diagnostico', 'diagnostico.json' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "diagnóstico saiu com código $($p.ExitCode)" }
+          Get-Content diagnostico.json
+      - name: Montar pacote
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force pacote | Out-Null
+          Copy-Item target/release/sexta-feira.exe pacote/
+          Copy-Item -Recurse voice-server pacote/voice-server
+          Copy-Item diagnostico.json pacote/
       - uses: actions/upload-artifact@v4
         with:
           name: sexta-feira-windows
-          path: target/release/sexta-feira.exe
+          path: pacote/
