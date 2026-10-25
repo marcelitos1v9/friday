@@ -14,6 +14,7 @@ pub struct Config {
     pub game_mode: GameModeConfig,
     pub widget: WidgetConfig,
     pub voice: VoiceConfig,
+    pub diagnostics: DiagnosticsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +53,20 @@ pub struct WidgetConfig {
     pub y: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DiagnosticsConfig {
+    /// De quantas em quantas horas roda o diagnóstico profundo sozinho (0 = só quando pedir).
+    /// Nunca roda sozinho durante o modo jogo.
+    pub auto_interval_h: u64,
+    /// Espera depois de abrir a Sexta-Feira antes do primeiro diagnóstico automático, em segundos.
+    pub startup_delay_s: u64,
+    /// Quantos dias do Log de Eventos analisar.
+    pub event_days: u32,
+    /// Drivers de rede, áudio, chipset etc. mais velhos que isso (em anos) entram no relatório.
+    pub old_driver_years: u32,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -59,6 +74,7 @@ impl Default for Config {
             game_mode: GameModeConfig::default(),
             widget: WidgetConfig::default(),
             voice: VoiceConfig::default(),
+            diagnostics: DiagnosticsConfig::default(),
         }
     }
 }
@@ -158,6 +174,12 @@ impl VoiceConfig {
         };
         let key = key.trim().to_string();
         (!key.is_empty()).then_some(key)
+    }
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self { auto_interval_h: 6, startup_delay_s: 180, event_days: 7, old_driver_years: 3 }
     }
 }
 

@@ -26,6 +26,28 @@ export struct AlertRow {
     message: string,
 }
 
+export struct FindingRow {
+    // 0 = info, 1 = atenção, 2 = crítico
+    severity: int,
+    category: string,
+    title: string,
+    detail: string,
+    suggestion: string,
+}
+
+export struct SensorRow {
+    label: string,
+    value: string,
+    // 0 = normal, 1 = quente, 2 = crítico
+    severity: int,
+}
+
+export global Severity {
+    public pure function color(level: int) -> color {
+        return level >= 2 ? Theme.crit : level == 1 ? Theme.warn : Theme.accent;
+    }
+}
+
 // Cor de acordo com a carga: ciano normal, laranja alto, vermelho crítico.
 export global Load {
     public pure function color(pct: float) -> color {

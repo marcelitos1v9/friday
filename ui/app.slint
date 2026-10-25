@@ -1,6 +1,7 @@
-import { Theme, Bar, Panel, HudButton, ProcessRow, AlertRow, Load } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
+import { Theme, Bar, Panel, HudButton, ProcessRow, AlertRow, FindingRow, SensorRow, Severity, Load } from "theme.slint";
 
-export { ProcessRow, AlertRow }
+export { ProcessRow, AlertRow, FindingRow, SensorRow }
 
 component MetricCard inherits Panel {
     in property <string> title;
@@ -40,6 +41,131 @@ component Core inherits Rectangle {
     }
 }
 
+component SectionTitle inherits Text {
+    color: Theme.text-dim;
+    font-size: 11px;
+    letter-spacing: 2px;
+}
+
+// Página "o que está errado no meu PC": resultado do diagnóstico profundo.
+component DiagnosticsPage inherits VerticalLayout {
+    in property <bool> running;
+    in property <string> summary;
+    in property <string> meta;
+    in property <[FindingRow]> findings;
+    in property <[SensorRow]> sensors;
+    in property <[string]> notes;
+    callback run();
+
+    spacing: 12px;
+
+    Panel {
+        height: 72px;
+        HorizontalLayout {
+            padding: 14px;
+            spacing: 12px;
+            VerticalLayout {
+                alignment: center;
+                spacing: 4px;
+                horizontal-stretch: 1;
+                Text {
+                    text: root.running ? "Analisando o seu PC…" : root.summary;
+                    color: Theme.text;
+                    font-size: 17px;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                Text { text: root.meta; color: Theme.text-dim; font-size: 12px; overflow: elide; }
+            }
+            HudButton {
+                y: (parent.height - self.height) / 2 - 14px;
+                text: root.running ? "Analisando…" : "Analisar agora";
+                active: root.running;
+                clicked => {
+                    if !root.running {
+                        root.run();
+                    }
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 12px;
+        vertical-stretch: 1;
+
+        Panel {
+            horizontal-stretch: 1;
+            VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+                SectionTitle { text: "O QUE ESTÁ ERRADO"; }
+                sv := ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        width: sv.visible-width;
+                        spacing: 12px;
+                        alignment: start;
+                        if root.findings.length == 0 && !root.running: Text {
+                            text: "Nada para mostrar ainda.";
+                            color: Theme.text-dim;
+                            font-size: 13px;
+                        }
+                        for f in root.findings: HorizontalLayout {
+                            spacing: 10px;
+                            padding-right: 12px;
+                            Rectangle {
+                                width: 8px; height: 8px; y: 6px; border-radius: 4px;
+                                background: Severity.color(f.severity);
+                            }
+                            VerticalLayout {
+                                spacing: 3px;
+                                horizontal-stretch: 1;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: f.title;
+                                        color: Theme.text;
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                        wrap: word-wrap;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text { text: f.category; color: Theme.text-dim; font-size: 11px; }
+                                }
+                                Text { text: f.detail; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+                                Text { text: "→ " + f.suggestion; color: Theme.accent; font-size: 12px; wrap: word-wrap; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Panel {
+            width: 300px;
+            VerticalLayout {
+                padding: 14px;
+                spacing: 8px;
+                alignment: start;
+                SectionTitle { text: "TEMPERATURAS"; }
+                if root.sensors.length == 0: Text {
+                    text: "Nenhum sensor lido ainda.";
+                    color: Theme.text-dim;
+                    font-size: 13px;
+                }
+                for s in root.sensors: HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: s.label; color: Theme.text; font-size: 13px; overflow: elide; horizontal-stretch: 1; }
+                    Text { text: s.value; color: Severity.color(s.severity); font-size: 13px; width: 60px; horizontal-alignment: right; }
+                }
+                if root.notes.length > 0: SectionTitle { text: "NÃO VERIFICADO"; }
+                for n in root.notes: Text { text: n; color: Theme.text-dim; font-size: 12px; wrap: word-wrap; }
+            }
+        }
+    }
+}
+
 export component MainWindow inherits Window {
     title: "Sexta-Feira";
     icon: @image-url("../assets/icon.png");
@@ -69,6 +195,16 @@ export component MainWindow inherits Window {
     in property <bool> listening;
     in property <bool> wake-word;
 
+    // 0 = painel, 1 = diagnóstico profundo
+    in-out property <int> page: 0;
+    in property <bool> diag-running;
+    in property <string> diag-summary: "Ainda não fiz o diagnóstico profundo.";
+    in property <string> diag-meta: "Clique em Analisar agora. Leva alguns segundos e roda em segundo plano.";
+    in property <[FindingRow]> diag-findings;
+    in property <[SensorRow]> diag-sensors;
+    in property <[string]> diag-notes;
+
+    callback run-diagnostics();
     callback toggle-widget();
     callback push-to-talk();
     callback train-wake-word();
@@ -94,6 +230,11 @@ export component MainWindow inherits Window {
                 alignment: center;
                 spacing: 8px;
                 HudButton {
+                    text: root.page == 0 ? "Diagnóstico" : "Painel";
+                    active: root.page == 1;
+                    clicked => { root.page = root.page == 0 ? 1 : 0; }
+                }
+                HudButton {
                     text: root.widget-visible ? "Ocultar widget" : "Mostrar widget";
                     active: root.widget-visible;
                     clicked => { root.toggle-widget(); }
@@ -111,65 +252,97 @@ export component MainWindow inherits Window {
             }
         }
 
-        // Métricas
-        HorizontalLayout {
-            spacing: 12px;
-            MetricCard { title: "CPU"; value: round(root.cpu-pct) + "%"; pct: root.cpu-pct; detail: root.cpu-detail; }
-            MetricCard { title: "MEMÓRIA"; value: root.ram-value; pct: root.ram-pct; detail: root.ram-detail; }
-            MetricCard { title: "GPU"; value: root.gpu-value; pct: root.gpu-pct; detail: root.gpu-detail; }
-            MetricCard { title: "SEXTA-FEIRA"; value: "Leve"; pct: 0; detail: root.self-detail; }
-        }
-
-        HorizontalLayout {
-            spacing: 12px;
+        if root.page == 0: VerticalLayout {
+            spacing: 16px;
             vertical-stretch: 1;
 
-            // Alertas
-            Panel {
-                horizontal-stretch: 1;
-                VerticalLayout {
-                    padding: 14px;
-                    spacing: 8px;
-                    alignment: start;
-                    Text { text: "DIAGNÓSTICO"; color: Theme.text-dim; font-size: 11px; letter-spacing: 2px; }
-                    if root.alerts.length == 0: Text {
-                        text: "Tudo certo com o seu PC.";
-                        color: Theme.accent;
-                        font-size: 14px;
-                    }
-                    for a in root.alerts: HorizontalLayout {
+            // Métricas
+            HorizontalLayout {
+                spacing: 12px;
+                MetricCard { title: "CPU"; value: round(root.cpu-pct) + "%"; pct: root.cpu-pct; detail: root.cpu-detail; }
+                MetricCard { title: "MEMÓRIA"; value: root.ram-value; pct: root.ram-pct; detail: root.ram-detail; }
+                MetricCard { title: "GPU"; value: root.gpu-value; pct: root.gpu-pct; detail: root.gpu-detail; }
+                MetricCard { title: "SEXTA-FEIRA"; value: "Leve"; pct: 0; detail: root.self-detail; }
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+                vertical-stretch: 1;
+
+                // Alertas
+                Panel {
+                    horizontal-stretch: 1;
+                    VerticalLayout {
+                        padding: 14px;
                         spacing: 8px;
-                        Rectangle {
-                            width: 8px; height: 8px; y: 5px; border-radius: 4px;
-                            background: a.severity >= 2 ? Theme.crit : a.severity == 1 ? Theme.warn : Theme.accent;
+                        alignment: start;
+                        Text { text: "DIAGNÓSTICO"; color: Theme.text-dim; font-size: 11px; letter-spacing: 2px; }
+                        if root.alerts.length == 0: Text {
+                            text: "Tudo certo com o seu PC.";
+                            color: Theme.accent;
+                            font-size: 14px;
                         }
-                        Text { text: a.message; color: Theme.text; font-size: 13px; wrap: word-wrap; horizontal-stretch: 1; }
+                        for a in root.alerts: HorizontalLayout {
+                            spacing: 8px;
+                            Rectangle {
+                                width: 8px; height: 8px; y: 5px; border-radius: 4px;
+                                background: a.severity >= 2 ? Theme.crit : a.severity == 1 ? Theme.warn : Theme.accent;
+                            }
+                            Text { text: a.message; color: Theme.text; font-size: 13px; wrap: word-wrap; horizontal-stretch: 1; }
+                        }
+                        Rectangle { height: 1px; background: Theme.panel-border; }
+                        Text {
+                            text: root.diag-running ? "Análise profunda em andamento…" : root.diag-summary;
+                            color: Theme.text-dim;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            HudButton {
+                                text: "Ver diagnóstico completo";
+                                min-width: 190px;
+                                clicked => { root.page = 1; }
+                            }
+                        }
+                    }
+                }
+
+                // Processos
+                Panel {
+                    horizontal-stretch: 1;
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 8px;
+                        alignment: start;
+                        Text { text: "PROCESSOS QUE MAIS USAM MEMÓRIA"; color: Theme.text-dim; font-size: 11px; letter-spacing: 2px; }
+                        for p in root.processes: HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: p.name; color: Theme.text; font-size: 13px; overflow: elide; horizontal-stretch: 1; }
+                            Text { text: p.cpu; color: Theme.text-dim; font-size: 13px; width: 60px; horizontal-alignment: right; }
+                            Text { text: p.mem; color: Theme.accent; font-size: 13px; width: 80px; horizontal-alignment: right; }
+                        }
+                        if root.game-mode: Text {
+                            text: "Pausado durante o jogo para não consumir recursos.";
+                            color: Theme.text-dim;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
                     }
                 }
             }
 
-            // Processos
-            Panel {
-                horizontal-stretch: 1;
-                VerticalLayout {
-                    padding: 14px;
-                    spacing: 8px;
-                    alignment: start;
-                    Text { text: "PROCESSOS QUE MAIS USAM MEMÓRIA"; color: Theme.text-dim; font-size: 11px; letter-spacing: 2px; }
-                    for p in root.processes: HorizontalLayout {
-                        spacing: 8px;
-                        Text { text: p.name; color: Theme.text; font-size: 13px; overflow: elide; horizontal-stretch: 1; }
-                        Text { text: p.cpu; color: Theme.text-dim; font-size: 13px; width: 60px; horizontal-alignment: right; }
-                        Text { text: p.mem; color: Theme.accent; font-size: 13px; width: 80px; horizontal-alignment: right; }
-                    }
-                    if root.game-mode: Text {
-                        text: "Pausado durante o jogo para não consumir recursos.";
-                        color: Theme.text-dim;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-                }
-            }
+        }
+
+        if root.page == 1: DiagnosticsPage {
+            vertical-stretch: 1;
+            running: root.diag-running;
+            summary: root.diag-summary;
+            meta: root.diag-meta;
+            findings: root.diag-findings;
+            sensors: root.diag-sensors;
+            notes: root.diag-notes;
+            run => { root.run-diagnostics(); }
         }
 
         // Voz
